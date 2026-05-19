@@ -1,0 +1,294 @@
+{
+  "ai_plan": {
+    "allow_decision_override": true,
+    "allow_risk_increase": true,
+    "authority_mode": "chief",
+    "block_when_unavailable": false,
+    "enabled": true,
+    "history_limit": 500,
+    "max_aggressive_order_quote": 15.0,
+    "max_calls_per_day": 10,
+    "max_output_tokens": 8192,
+    "max_web_search_calls": 1,
+    "max_research_score_to_increase": 70,
+    "max_risk_multiplier": 1.5,
+    "max_spread_bps_to_increase": 25,
+    "min_confidence_to_increase": 72,
+    "min_regime_score_to_increase": 1,
+    "min_signal_score_to_increase": 2,
+    "model": "gpt-5.5",
+    "model_fallbacks": [
+      "gpt-5.1",
+      "gpt-5"
+    ],
+    "override_max_research_score": 70,
+    "override_min_confidence": 82,
+    "override_min_positive_breadth": 0.45,
+    "override_min_signal_score": 0,
+    "reasoning_effort": "high",
+    "reasoning_summary": "concise",
+    "refresh_interval_minutes": 90,
+    "web_search": true,
+    "force_web_search": true,
+    "web_search_context_size": "low"
+  },
+  "advanced_strategy": {
+    "enabled": true,
+    "kelly_fraction": 0.25,
+    "max_es_pct": 5.0,
+    "max_kelly_multiplier": 1.2,
+    "max_var_pct": 3.0,
+    "min_kelly_multiplier": 0.4,
+    "supertrend_multiplier": 3.0,
+    "supertrend_period": 10,
+    "turtle_breakout_period": 20,
+    "turtle_soup_period": 20,
+    "var_lookback": 48
+  },
+  "base_asset": "XXBT",
+  "candle_interval_minutes": 5,
+  "downside": {
+    "block_buys_when_downside": true,
+    "close_short_reversal_score": 2,
+    "enabled": true,
+    "live_short_enabled": false,
+    "min_short_momentum_pct": 0.15,
+    "min_short_score": 4,
+    "require_higher_timeframe_downtrend": true,
+    "shadow_short_enabled": true
+  },
+  "exchange": "kraken",
+  "execution": {
+    "aggressive_buy_score_max": 3,
+    "approval_mode": "aggressive_only",
+    "approval_ttl_minutes": 30,
+    "max_cycle_gap_seconds": 900,
+    "min_trade_interval_seconds": 600,
+    "notify_on_fill": true,
+    "notify_on_signal": true,
+    "reconnect_observe_cycles": 1,
+    "trading_windows_utc": [
+      {
+        "end": "08:00",
+        "start": "00:00"
+      }
+    ]
+  },
+  "llm": {
+    "block_when_unavailable": false,
+    "enabled": false,
+    "max_calls_per_day": 6,
+    "model": "gpt-5.4-mini",
+    "veto_risk_score": 80
+  },
+  "market_filters": {
+    "atr_period": 14,
+    "max_atr_pct": 3.0,
+    "max_candle_range_pct": 5.0,
+    "max_spread_bps": 45
+  },
+  "market_radar": {
+    "block_buy_breadth_below": 0.15,
+    "context_pairs": [
+      "USDCAD",
+      "USDCUSD",
+      "USDCCAD",
+      "USDTCAD",
+      "USDTUSD",
+      "EURCAD",
+      "EURUSD",
+      "GBPUSD",
+      "AUDUSD"
+    ],
+    "enabled": true,
+    "max_pairs_per_cycle": 42,
+    "min_positive_breadth_to_increase": 0.45,
+    "pairs": [
+      "XBTCAD",
+      "ETHCAD",
+      "SOLCAD",
+      "XRPCAD",
+      "XDGCAD",
+      "PEPECAD",
+      "XDCCAD",
+      "XBTUSD",
+      "ETHUSD",
+      "SOLUSD",
+      "XRPUSD",
+      "ADAUSD",
+      "XDGUSD",
+      "LTCUSD",
+      "DOTUSD",
+      "AVAXUSD",
+      "LINKUSD",
+      "UNIUSD",
+      "BCHUSD",
+      "ATOMUSD",
+      "FILUSD",
+      "NEARUSD",
+      "APTUSD",
+      "ARBUSD",
+      "OPUSD",
+      "POLUSD",
+      "ETCUSD",
+      "AAVEUSD",
+      "XLMUSD",
+      "TRXUSD",
+      "SUIUSD",
+      "PEPEUSD",
+      "SHIBUSD"
+    ]
+  },
+  "mode": "paper",
+  "multi_timeframe": {
+    "enabled": true,
+    "interval_minutes": 15,
+    "min_buy_score": 1
+  },
+  "notifications": {
+    "daily_report_local_time": "21:30",
+    "macos": {
+      "enabled": false
+    },
+    "weixin": {
+      "enabled": false,
+      "send_financial_data": false,
+      "target": ""
+    }
+  },
+  "pair": "XBTUSD",
+  "paths": {
+    "ai_plan": "ai_plan.json",
+    "ai_plan_log": "ai_plan_log.jsonl",
+    "ledger_db": "ledger.sqlite3",
+    "notification_outbox": "notification_outbox.jsonl",
+    "pending_order": "pending_order.json",
+    "research_cache": "research_snapshot.json",
+    "shadow_log": "shadow_trades.jsonl",
+    "shadow_state": "shadow_state.json",
+    "state_file": "state.json",
+    "trade_log": "trades.jsonl"
+  },
+  "poll_seconds": 300,
+  "quote_asset": "ZUSD",
+  "research": {
+    "block_buy_risk_score": 95,
+    "enabled": true,
+    "feeds": [
+      {
+        "name": "Fed Monetary Policy",
+        "url": "https://www.federalreserve.gov/feeds/press_monetary.xml",
+        "weight": 1.0
+      },
+      {
+        "name": "SEC Press Releases",
+        "url": "https://www.sec.gov/news/pressreleases.rss",
+        "weight": 1.0
+      },
+      {
+        "name": "CFTC General Press Releases",
+        "url": "https://www.cftc.gov/RSS/RSSGP/rssgp.xml",
+        "weight": 1.0
+      },
+      {
+        "name": "CFTC Enforcement Press Releases",
+        "url": "https://www.cftc.gov/RSS/RSSENF/rssenf.xml",
+        "weight": 1.1
+      },
+      {
+        "exclude_titles": [
+          "view all",
+          "readouts",
+          "testimonies",
+          "statements",
+          "remarks"
+        ],
+        "include_href": [
+          "/news/press-releases/"
+        ],
+        "name": "U.S. Treasury Press Releases",
+        "type": "html",
+        "url": "https://home.treasury.gov/news/press-releases",
+        "weight": 1.0
+      },
+      {
+        "name": "Kraken Status",
+        "url": "https://status.kraken.com/history.rss",
+        "weight": 1.4
+      },
+      {
+        "name": "CoinDesk",
+        "url": "https://www.coindesk.com/arc/outboundfeeds/rss",
+        "weight": 0.7
+      }
+    ],
+    "fetch_interval_minutes": 60,
+    "items_per_feed": 12,
+    "max_items": 24,
+    "reduce_size_risk_score": 55,
+    "reduced_size_multiplier": 0.7
+  },
+  "risk": {
+    "cooldown_minutes": 10,
+    "daily_loss_limit_quote": 5.0,
+    "fee_bps": 80,
+    "max_daily_equity_drawdown_quote": 5.0,
+    "max_high_water_drawdown_quote": 5.0,
+    "max_order_quote": 15.0,
+    "max_position_quote": 45.0,
+    "max_trades_per_day": 18,
+    "min_net_profit_bps": 50,
+    "reserve_quote_balance": 5.0,
+    "risk_per_trade_quote": 1.5,
+    "slippage_bps": 10,
+    "starting_paper_quote": 50.0,
+    "stop_loss_pct": 0.055,
+    "take_profit_pct": 0.08
+  },
+  "rotation": {
+    "enabled": true,
+    "max_spread_bps": 40,
+    "min_score": 2,
+    "one_live_position_at_a_time": true,
+    "pairs": [
+      "XBTCAD",
+      "ETHCAD",
+      "SOLCAD",
+      "XRPCAD",
+      "XDGCAD",
+      "PEPECAD",
+      "XDCCAD"
+    ],
+    "quote_asset": "ZCAD"
+  },
+  "scan_pairs": [
+    "XBTCAD",
+    "ETHCAD",
+    "SOLCAD",
+    "XRPCAD",
+    "XDGCAD",
+    "PEPECAD",
+    "XDCCAD"
+  ],
+  "shadow": {
+    "enabled": true,
+    "starting_quote": 50.0
+  },
+  "strategy": {
+    "bollinger_period": 20,
+    "bollinger_stddev": 2.0,
+    "buy_rsi_max": 74,
+    "ema_trend_period": 48,
+    "fast_sma_period": 12,
+    "macd_fast_period": 12,
+    "macd_signal_period": 9,
+    "macd_slow_period": 26,
+    "min_buy_momentum_pct": 0.0,
+    "min_buy_score": 2,
+    "min_sell_score": 3,
+    "rsi_period": 14,
+    "sell_rsi_min": 35,
+    "slow_sma_period": 36
+  },
+  "ws_symbol": "BTC/USD"
+}
