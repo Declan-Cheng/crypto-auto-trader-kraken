@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 from decimal import Decimal
 from pathlib import Path
 
@@ -19,9 +20,70 @@ from bot import (
 )
 
 
+def max_drawdown_from_curve(curve: list[Decimal]) -> Decimal:
+    peak: Decimal | None = None
+    max_drawdown = Decimal("0")
+    for value in curve:
+        peak = value if peak is None else max(peak, value)
+        max_drawdown = max(max_drawdown, peak - value)
+    return max_drawdown
+
+
+def monte_carlo_from_equity_curve(
+    equity_curve: list[Decimal],
+    *,
+    simulations: int,
+    seed: int,
+) -> dict[str, str | int]:
+    if simulations <= 0 or len(equity_curve) < 3:
+        return {"enabled": False, "simulations": 0}
+
+    returns: list[Decimal] = []
+    for previous, current in zip(equity_curve, equity_curve[1:]):
+        if previous > 0:
+            returns.append((current - previous) / previous)
+    if not returns:
+        return {"enabled": False, "simulations": 0}
+
+    rng = random.Random(seed)
+    endings: list[Decimal] = []
+    drawdowns: list[Decimal] = []
+    start = equity_curve[0]
+    for _ in range(simulations):
+        shuffled = list(returns)
+        rng.shuffle(shuffled)
+        value = start
+        path = [value]
+        for step_return in shuffled:
+            value *= Decimal("1") + step_return
+            path.append(value)
+        endings.append(value)
+        drawdowns.append(max_drawdown_from_curve(path))
+
+    def percentile(values: list[Decimal], pct: Decimal) -> Decimal:
+        ordered = sorted(values)
+        if len(ordered) == 1:
+            return ordered[0]
+        idx = int((Decimal(len(ordered) - 1) * pct).to_integral_value())
+        return ordered[max(0, min(idx, len(ordered) - 1))]
+
+    return {
+        "enabled": True,
+        "simulations": simulations,
+        "seed": seed,
+        "ending_equity_p05": str(percentile(endings, Decimal("0.05"))),
+        "ending_equity_p50": str(percentile(endings, Decimal("0.50"))),
+        "ending_equity_p95": str(percentile(endings, Decimal("0.95"))),
+        "max_drawdown_p50": str(percentile(drawdowns, Decimal("0.50"))),
+        "max_drawdown_p95": str(percentile(drawdowns, Decimal("0.95"))),
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Quick Kraken OHLC strategy backtest over the latest available candles")
     parser.add_argument("--config", type=Path, default=Path("config.json"))
+    parser.add_argument("--monte-carlo", type=int, default=0, help="Run N shuffled-return Monte Carlo simulations")
+    parser.add_argument("--seed", type=int, default=42, help="Monte Carlo random seed")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -52,7 +114,7 @@ def main() -> int:
     trades = []
     short_trades = []
     short_state: dict[str, str | int | None] = {}
-    equity_curve = []
+    equity_curve: list[Decimal] = []
     short_equity_curve = []
     peak_equity = config.risk.starting_paper_quote
     max_drawdown = Decimal("0")
@@ -67,7 +129,7 @@ def main() -> int:
         equity = Decimal(str(state["paper_quote_balance"])) + base * mark_price
         peak_equity = max(peak_equity, equity)
         max_drawdown = max(max_drawdown, peak_equity - equity)
-        equity_curve.append(str(equity))
+        equity_curve.append(equity)
         if signal.side == "hold":
             result = {"status": "skipped"}
         else:
@@ -118,6 +180,7 @@ def main() -> int:
                 "score_return_minus_drawdown_pct": str(score),
                 "open_base": state["paper_base_balance"],
                 "last_price": str(last_price),
+                "monte_carlo": monte_carlo_from_equity_curve(equity_curve, simulations=args.monte_carlo, seed=args.seed),
                 "trade_sample": trades[-5:],
                 "shadow_short_trades": len(short_trades),
                 "shadow_short_ending_equity_quote": str(short_ending_equity),

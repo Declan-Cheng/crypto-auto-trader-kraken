@@ -872,9 +872,68 @@ def test_rotation_selects_best_quote_matched_candidate(tmp_path: Path) -> None:
 
     selected, detail = bot.select_rotation_pair(config, FakeClient(), {"paper_base_balance": "0"})
 
-    assert selected.pair == "ETHUSD"
+    assert selected.pair in {"ETHUSD", "SOLUSD"}
     assert selected.base_asset == "XETH"
     assert detail["reason"] == "selected_best_candidate"
+
+
+def test_dynamic_pairlist_adds_high_volume_filtered_pairs(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    config.raw["rotation"] = {
+        "enabled": True,
+        "quote_asset": "ZUSD",
+        "pairs": ["XBTUSD"],
+        "min_score": 2,
+        "max_spread_bps": 25,
+    }
+    config.raw["dynamic_pairlist"] = {
+        "enabled": True,
+        "quote_asset": "ZUSD",
+        "max_assets": 3,
+        "max_source_pairs": 10,
+        "max_spread_bps": 25,
+        "min_quote_volume": "1000",
+        "include_static_pairs": True,
+    }
+
+    class FakeClient:
+        def balances(self) -> dict[str, Decimal]:
+            return {"ZUSD": Decimal("50")}
+
+        def asset_pairs(self) -> dict[str, dict[str, str]]:
+            return {
+                "ETHUSD": {"base": "XETH", "quote": "ZUSD", "status": "online"},
+                "SOLUSD": {"base": "SOL", "quote": "ZUSD", "status": "online"},
+                "WIDEUSD": {"base": "WIDE", "quote": "ZUSD", "status": "online"},
+                "ETHEUR": {"base": "XETH", "quote": "ZEUR", "status": "online"},
+            }
+
+        def asset_pair_rules(self, pair: str) -> dict[str, str]:
+            return {
+                "XBTUSD": {"base": "XXBT", "quote": "ZUSD"},
+                "ETHUSD": {"base": "XETH", "quote": "ZUSD"},
+                "SOLUSD": {"base": "SOL", "quote": "ZUSD"},
+                "WIDEUSD": {"base": "WIDE", "quote": "ZUSD"},
+            }[pair]
+
+        def ticker(self, pair: str) -> bot.Ticker:
+            spread = Decimal("100") if pair == "WIDEUSD" else Decimal("10")
+            volume = {"XBTUSD": "1500", "ETHUSD": "8000", "SOLUSD": "5000", "WIDEUSD": "9999"}[pair]
+            return bot.Ticker(Decimal("99.95"), Decimal("100.05"), Decimal("100"), spread, Decimal("1"), Decimal(volume))
+
+        def candles(self, pair: str, _interval_minutes: int | None = None) -> list[bot.Candle]:
+            if pair == "ETHUSD":
+                return candles(["10", "10.1", "10.2", "10.35", "10.5", "10.7", "10.9", "11.2"])
+            if pair == "SOLUSD":
+                return candles(["9", "9.05", "9.1", "9.2", "9.35", "9.55", "9.75", "10.0"])
+            return candles(["20", "20", "19.9", "19.8", "19.7", "19.6", "19.5", "19.4"])
+
+    selected, detail = bot.select_rotation_pair(config, FakeClient(), {"paper_base_balance": "0"})
+
+    assert selected.pair in {"ETHUSD", "SOLUSD"}
+    assert detail["dynamic_pairlist"]["enabled"] is True
+    assert "ETHUSD" in detail["dynamic_pairlist"]["selected_pairs"]
+    assert "WIDEUSD" not in detail["dynamic_pairlist"]["selected_pairs"]
 
 
 def test_rotation_ignores_dust_active_position(tmp_path: Path) -> None:

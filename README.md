@@ -12,6 +12,8 @@ Crypto trading can lose money quickly. The default mode is `paper`.
 - Supports paper trading by default and live Kraken spot trading when explicitly enabled.
 - Tracks decisions, balances, PnL snapshots, orders, notifications, and review bundles.
 - Scans multiple crypto pairs and basic USD/stablecoin/FX context pairs.
+- Can build a dynamic Kraken pairlist filtered by quote asset, spread, price,
+  and quote volume before selecting a rotation candidate.
 - Applies hard risk gates for spread, fees, volatility, daily drawdown, max position, reconnect observation, and live acknowledgement.
 - Optionally calls an OpenAI model through `OPENAI_API_KEY` for a structured strategy plan with web search when supported.
 - Generates daily/weekly review bundles that can be analyzed by humans or external models.
@@ -59,6 +61,12 @@ Run tests:
 
 ```bash
 python -m pytest
+```
+
+Backtest with Monte Carlo stress testing:
+
+```bash
+python backtest.py --config config.json --monte-carlo 250 --seed 42
 ```
 
 ## Live Trading Setup
@@ -205,6 +213,10 @@ Good community contribution areas:
 - Safer model-plan evaluation.
 - Better regime detection and pair rotation.
 - Better tests for edge cases, reconnect behavior, and order reconciliation.
+
+See [OPEN_SOURCE_BENCHMARK.md](OPEN_SOURCE_BENCHMARK.md) for notes from
+comparing this bot against Freqtrade, OctoBot, Jesse, Hummingbot, and
+NautilusTrader.
 
 Please keep live-trading changes conservative by default and include tests for
 new risk or execution behavior.

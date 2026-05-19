@@ -250,6 +250,7 @@ class Ticker:
     last: Decimal
     spread_bps: Decimal
     change_pct: Decimal
+    quote_volume: Decimal = Decimal("0")
 
 
 class KrakenClient:
@@ -321,6 +322,7 @@ class KrakenClient:
             change_pct=((last - Decimal(market["o"])) / Decimal(market["o"]) * Decimal("100"))
             if Decimal(market["o"]) > 0
             else Decimal("0"),
+            quote_volume=Decimal(market.get("v", ["0", "0"])[1]) * last,
         )
 
     def candles(self, pair: str, interval_minutes: int) -> list[Candle]:
@@ -343,6 +345,9 @@ class KrakenClient:
     def asset_pair_rules(self, pair: str) -> dict[str, Any]:
         result = self.public("AssetPairs", {"pair": pair})
         return next(iter(result.values()))
+
+    def asset_pairs(self) -> dict[str, Any]:
+        return self.public("AssetPairs")
 
     def balances(self) -> dict[str, Decimal]:
         result = self.private("Balance")
@@ -1863,12 +1868,110 @@ def config_for_pair(config: BotConfig, client: KrakenClient, pair: str) -> BotCo
     return replace(config, raw=raw, pair=pair, ws_symbol=pair, base_asset=base_asset, quote_asset=quote_asset)
 
 
+def build_dynamic_pairlist(
+    config: BotConfig,
+    client: KrakenClient,
+    static_pairs: list[str],
+) -> tuple[list[str], dict[str, Any]]:
+    pairlist_cfg = config.raw.get("dynamic_pairlist", {})
+    if not pairlist_cfg.get("enabled", False):
+        return static_pairs, {"enabled": False}
+
+    quote_asset = str(pairlist_cfg.get("quote_asset", config.raw.get("rotation", {}).get("quote_asset", config.quote_asset)))
+    max_assets = int(pairlist_cfg.get("max_assets", 12))
+    max_source_pairs = int(pairlist_cfg.get("max_source_pairs", 80))
+    max_spread_bps = Decimal(str(pairlist_cfg.get("max_spread_bps", config.market_filters.max_spread_bps)))
+    min_quote_volume = Decimal(str(pairlist_cfg.get("min_quote_volume", "0")))
+    min_price = Decimal(str(pairlist_cfg.get("min_price", "0")))
+    max_price = Decimal(str(pairlist_cfg.get("max_price", "0")))
+    include_static = bool(pairlist_cfg.get("include_static_pairs", True))
+
+    pairs: list[str] = []
+    errors: dict[str, str] = {}
+    try:
+        for pair, meta in client.asset_pairs().items():
+            if len(pairs) >= max_source_pairs:
+                break
+            if not isinstance(meta, dict):
+                continue
+            if meta.get("status") not in {None, "", "online"}:
+                continue
+            if str(meta.get("quote") or "") != quote_asset:
+                continue
+            if ".d" in str(pair).lower():
+                continue
+            pairs.append(str(pair))
+    except Exception as exc:
+        errors["asset_pairs"] = f"{type(exc).__name__}: {exc}"
+        pairs = []
+
+    if include_static:
+        for pair in static_pairs:
+            if pair not in pairs:
+                pairs.insert(0, pair)
+
+    candidates: list[dict[str, Any]] = []
+    for pair in pairs[:max_source_pairs]:
+        try:
+            ticker = client.ticker(pair)
+            if ticker.spread_bps > max_spread_bps:
+                continue
+            if ticker.quote_volume < min_quote_volume:
+                continue
+            if min_price > 0 and ticker.last < min_price:
+                continue
+            if max_price > 0 and ticker.last > max_price:
+                continue
+            candidates.append(
+                {
+                    "pair": pair,
+                    "spread_bps": str(ticker.spread_bps),
+                    "quote_volume": str(ticker.quote_volume),
+                    "last": str(ticker.last),
+                    "change_pct": str(ticker.change_pct),
+                }
+            )
+        except Exception as exc:
+            errors[pair] = f"{type(exc).__name__}: {exc}"
+
+    candidates.sort(
+        key=lambda item: (
+            Decimal(str(item.get("quote_volume", "0"))),
+            Decimal(str(item.get("change_pct", "0"))),
+            -Decimal(str(item.get("spread_bps", "999999"))),
+        ),
+        reverse=True,
+    )
+    selected: list[str] = []
+    for item in candidates:
+        pair = str(item["pair"])
+        if pair not in selected:
+            selected.append(pair)
+        if len(selected) >= max_assets:
+            break
+
+    return selected or static_pairs, {
+        "enabled": True,
+        "quote_asset": quote_asset,
+        "max_assets": max_assets,
+        "max_source_pairs": max_source_pairs,
+        "min_quote_volume": str(min_quote_volume),
+        "max_spread_bps": str(max_spread_bps),
+        "selected_pairs": selected,
+        "top_candidates": candidates[:8],
+        "errors": errors,
+    }
+
+
 def select_rotation_pair(config: BotConfig, client: KrakenClient, state: dict[str, Any]) -> tuple[BotConfig, dict[str, Any]]:
     rotation_cfg = config.raw.get("rotation", {})
     if not rotation_cfg.get("enabled", False):
         return config, {"enabled": False, "active_pair": config.pair, "reason": "disabled"}
 
     allowed_pairs = list(rotation_cfg.get("pairs") or config.scan_pairs or [config.pair])
+    if config.pair not in allowed_pairs:
+        allowed_pairs.insert(0, config.pair)
+    allowed_pairs, dynamic_pairlist = build_dynamic_pairlist(config, client, allowed_pairs)
     if config.pair not in allowed_pairs:
         allowed_pairs.insert(0, config.pair)
     quote_asset = str(rotation_cfg.get("quote_asset", config.quote_asset))
@@ -1911,6 +2014,7 @@ def select_rotation_pair(config: BotConfig, client: KrakenClient, state: dict[st
                     "market_allowed": market_allowed,
                     "market_reason": market_reason,
                     "spread_bps": market_metrics.get("spread_bps"),
+                    "quote_volume": str(ticker.quote_volume),
                     "price": str(signal.price),
                     "advanced_strategy": advanced,
                 }
@@ -1926,7 +2030,14 @@ def select_rotation_pair(config: BotConfig, client: KrakenClient, state: dict[st
         and Decimal(str(item.get("spread_bps", "999"))) <= max_spread_bps
         and not item.get("advanced_strategy", {}).get("risk_model", {}).get("risk_block")
     ]
-    eligible.sort(key=lambda item: (int(item.get("score", -999)), Decimal(str(item.get("momentum_pct", "0")))), reverse=True)
+    eligible.sort(
+        key=lambda item: (
+            int(item.get("score", -999)),
+            Decimal(str(item.get("momentum_pct", "0"))),
+            Decimal(str(item.get("quote_volume", "0"))),
+        ),
+        reverse=True,
+    )
     chosen = eligible[0]["pair"] if eligible else config.pair
     state["active_pair"] = chosen
     return config_for_pair(config, client, chosen), {
@@ -1935,6 +2046,7 @@ def select_rotation_pair(config: BotConfig, client: KrakenClient, state: dict[st
         "reason": "selected_best_candidate" if eligible else "no_candidate_met_rotation_gate",
         "min_score": min_score,
         "max_spread_bps": str(max_spread_bps),
+        "dynamic_pairlist": dynamic_pairlist,
         "top_candidates": candidates[:8],
         "errors": errors,
     }

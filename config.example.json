@@ -57,6 +57,16 @@
     "require_higher_timeframe_downtrend": true,
     "shadow_short_enabled": true
   },
+  "dynamic_pairlist": {
+    "enabled": true,
+    "include_static_pairs": true,
+    "max_assets": 12,
+    "max_source_pairs": 80,
+    "max_spread_bps": 35,
+    "min_price": 0,
+    "min_quote_volume": 50000,
+    "quote_asset": "ZUSD"
+  },
   "exchange": "kraken",
   "execution": {
     "aggressive_buy_score_max": 3,
