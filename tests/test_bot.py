@@ -97,6 +97,13 @@ def make_config(tmp_path: Path, mode: str = "paper") -> bot.BotConfig:
                     "block_buy_risk_score": 70,
                     "reduced_size_multiplier": 0.5,
                 },
+                "protections": {
+                    "enabled": True,
+                    "pair_cooldown_after_sell_minutes": 30,
+                    "consecutive_loss_limit": 2,
+                    "max_realized_loss_quote": 3,
+                    "stop_duration_minutes": 120,
+                },
             }
         )
     )
@@ -256,6 +263,7 @@ def test_paper_round_trip_subtracts_fee_from_balances_and_pnl(tmp_path: Path) ->
 
 def test_daily_loss_limit_blocks_only_losses(tmp_path: Path) -> None:
     config = make_config(tmp_path)
+    config.raw["protections"]["enabled"] = False
     buy_signal = bot.Signal("buy", "test", Decimal("100"), Decimal("1"), Decimal("1"), Decimal("50"))
     state = bot.load_state(config)
 
@@ -264,6 +272,33 @@ def test_daily_loss_limit_blocks_only_losses(tmp_path: Path) -> None:
 
     state["realized_pnl_today"] = "-5"
     assert bot.risk_allows_trade(config, state, buy_signal) == (False, "daily_loss_limit")
+
+
+def test_pair_cooldown_after_sell_blocks_new_buys(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    state = bot.new_paper_state(Decimal("50"))
+    state["paper_base_balance"] = "1"
+    state["avg_entry_price"] = "12"
+    sell_signal = bot.Signal("sell", "stop_loss", Decimal("10"), Decimal("1"), Decimal("1"), Decimal("50"))
+
+    result = bot.execute_paper_order(config, state, sell_signal)
+
+    assert result["status"] == "filled_paper"
+    buy_signal = bot.Signal("buy", "score_buy", Decimal("10"), Decimal("1"), Decimal("1"), Decimal("50"))
+    assert bot.risk_allows_trade(config, state, buy_signal) == (False, "pair_cooldown_after_sell")
+
+
+def test_consecutive_loss_guard_locks_new_buys(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    state = bot.new_paper_state(Decimal("50"))
+    state["consecutive_loss_trades"] = 2
+    buy_signal = bot.Signal("buy", "score_buy", Decimal("10"), Decimal("1"), Decimal("1"), Decimal("50"))
+
+    allowed, reason = bot.risk_allows_trade(config, state, buy_signal)
+
+    assert allowed is False
+    assert reason == "consecutive_loss_guard"
+    assert state["protection_global_lock_until"]
 
 
 def test_min_trade_interval_is_independent_from_poll_seconds(tmp_path: Path) -> None:

@@ -11,7 +11,7 @@ import subprocess
 import time
 import urllib.parse
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_DOWN
 from pathlib import Path
 from typing import Any, Literal
@@ -564,6 +564,10 @@ def new_paper_state(starting_quote: Decimal) -> dict[str, Any]:
         "ai_plan_day": today_key(),
         "active_pair": None,
         "realized_pnl_today": "0",
+        "consecutive_loss_trades": 0,
+        "protection_global_lock_until": None,
+        "protection_global_lock_reason": None,
+        "protection_pair_locks": {},
         "trade_day": today_key(),
         "trades_today": 0,
     }
@@ -820,6 +824,10 @@ def reset_daily_if_needed(state: dict[str, Any]) -> None:
         state["trade_day"] = current
         state["trades_today"] = 0
         state["realized_pnl_today"] = "0"
+        state["consecutive_loss_trades"] = 0
+        state["protection_global_lock_until"] = None
+        state["protection_global_lock_reason"] = None
+        state["protection_pair_locks"] = {}
         state["daily_report_sent_day"] = None
     if state.get("llm_day") != current:
         state["llm_day"] = current
@@ -1395,6 +1403,49 @@ def in_cooldown(state: dict[str, Any], cooldown_minutes: int) -> bool:
     return elapsed.total_seconds() < cooldown_minutes * 60
 
 
+def iso_now_plus(minutes: int) -> str:
+    return (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat()
+
+
+def iso_is_future(value: Any) -> bool:
+    if not value:
+        return False
+    try:
+        until = datetime.fromisoformat(str(value))
+    except ValueError:
+        return False
+    return datetime.now(timezone.utc) < until
+
+
+def pair_lock_reason(config: BotConfig, state: dict[str, Any]) -> tuple[bool, str]:
+    protections = config.raw.get("protections", {})
+    if not protections.get("enabled", False):
+        return False, "disabled"
+    if iso_is_future(state.get("protection_global_lock_until")):
+        return True, str(state.get("protection_global_lock_reason") or "protection_global_lock")
+
+    pair_locks = state.get("protection_pair_locks")
+    if isinstance(pair_locks, dict):
+        pair_lock = pair_locks.get(config.pair)
+        if isinstance(pair_lock, dict) and iso_is_future(pair_lock.get("until")):
+            return True, str(pair_lock.get("reason") or "protection_pair_lock")
+
+    stop_minutes = int(protections.get("stop_duration_minutes", 0))
+    max_loss = Decimal(str(protections.get("max_realized_loss_quote", "0")))
+    if stop_minutes > 0 and max_loss > 0 and Decimal(str(state.get("realized_pnl_today", "0"))) <= -max_loss:
+        state["protection_global_lock_until"] = iso_now_plus(stop_minutes)
+        state["protection_global_lock_reason"] = "realized_loss_guard"
+        return True, "realized_loss_guard"
+
+    loss_limit = int(protections.get("consecutive_loss_limit", 0))
+    if stop_minutes > 0 and loss_limit > 0 and int(state.get("consecutive_loss_trades", 0)) >= loss_limit:
+        state["protection_global_lock_until"] = iso_now_plus(stop_minutes)
+        state["protection_global_lock_reason"] = "consecutive_loss_guard"
+        return True, "consecutive_loss_guard"
+
+    return False, "ok"
+
+
 def below_min_trade_interval(state: dict[str, Any], min_trade_interval_seconds: int) -> bool:
     if min_trade_interval_seconds <= 0:
         return False
@@ -1411,6 +1462,10 @@ def risk_allows_trade(config: BotConfig, state: dict[str, Any], signal: Signal) 
         return False, "hold_signal"
     if signal.side == "buy" and state.get("equity_kill_switch_active"):
         return False, str(state.get("equity_kill_switch_reason") or "equity_kill_switch")
+    if signal.side == "buy":
+        locked, reason = pair_lock_reason(config, state)
+        if locked:
+            return False, reason
     if below_min_trade_interval(state, config.execution.min_trade_interval_seconds):
         return False, "min_trade_interval"
     if in_cooldown(state, config.risk.cooldown_minutes):
@@ -1424,6 +1479,11 @@ def risk_allows_trade(config: BotConfig, state: dict[str, Any], signal: Signal) 
 
 HARD_AI_OVERRIDE_BLOCKS = {
     "daily_loss_limit",
+    "realized_loss_guard",
+    "consecutive_loss_guard",
+    "pair_cooldown_after_sell",
+    "protection_global_lock",
+    "protection_pair_lock",
     "equity_kill_switch",
     "daily_equity_drawdown",
     "high_water_equity_drawdown",
@@ -2118,6 +2178,7 @@ def execute_paper_order(
         state["paper_base_balance"] = "0"
         state["avg_entry_price"] = None
         state["realized_pnl_today"] = str(Decimal(str(state["realized_pnl_today"])) + pnl)
+        update_protections_after_sell(config, state, pnl)
         mark_trade(state)
         return {
             "status": "filled_paper",
@@ -2267,7 +2328,35 @@ def mark_trade(state: dict[str, Any]) -> None:
     state["trades_today"] = int(state.get("trades_today", 0)) + 1
 
 
-def update_live_position_estimate(state: dict[str, Any], order: dict[str, Any], prior_base_balance: Decimal) -> None:
+def update_protections_after_sell(config: BotConfig, state: dict[str, Any], pnl: Decimal) -> None:
+    protections = config.raw.get("protections", {})
+    if pnl < 0:
+        state["consecutive_loss_trades"] = int(state.get("consecutive_loss_trades", 0)) + 1
+    elif pnl > 0:
+        state["consecutive_loss_trades"] = 0
+
+    if not protections.get("enabled", False):
+        return
+    pair_cooldown = int(protections.get("pair_cooldown_after_sell_minutes", 0))
+    if pair_cooldown <= 0:
+        return
+    locks = state.get("protection_pair_locks")
+    if not isinstance(locks, dict):
+        locks = {}
+    locks[config.pair] = {
+        "until": iso_now_plus(pair_cooldown),
+        "reason": "pair_cooldown_after_sell",
+        "pnl": str(pnl),
+    }
+    state["protection_pair_locks"] = locks
+
+
+def update_live_position_estimate(
+    state: dict[str, Any],
+    order: dict[str, Any],
+    prior_base_balance: Decimal,
+    config: BotConfig | None = None,
+) -> None:
     """Keep a live entry estimate so stop/take-profit logic can protect positions."""
     if order.get("status") not in {"submitted", "closed"}:
         return
@@ -2280,6 +2369,8 @@ def update_live_position_estimate(state: dict[str, Any], order: dict[str, Any], 
             avg_entry = Decimal(str(state["avg_entry_price"]))
             pnl = (executed_cost - fee_quote) - (avg_entry * executed_volume)
             state["realized_pnl_today"] = str(Decimal(str(state.get("realized_pnl_today", "0"))) + pnl)
+            if config is not None:
+                update_protections_after_sell(config, state, pnl)
         state["avg_entry_price"] = None
         return
     if side != "buy":
@@ -2726,7 +2817,7 @@ def run_once(config: BotConfig, validate_orders: bool) -> dict[str, Any]:
                 if event["order"]["status"] == "submitted" and not validate_orders:
                     event["order"] = reconcile_live_order(client, event["order"])
             if event["order"]["status"] in {"submitted", "closed"}:
-                update_live_position_estimate(state, event["order"], base_balance)
+                update_live_position_estimate(state, event["order"], base_balance, config)
                 mark_trade(state)
                 if config.execution.notify_on_fill:
                     notify_channels(

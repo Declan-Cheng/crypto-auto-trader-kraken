@@ -180,6 +180,13 @@
     "trade_log": "trades.jsonl"
   },
   "poll_seconds": 300,
+  "protections": {
+    "consecutive_loss_limit": 2,
+    "enabled": true,
+    "max_realized_loss_quote": 2.0,
+    "pair_cooldown_after_sell_minutes": 30,
+    "stop_duration_minutes": 180
+  },
   "quote_asset": "ZUSD",
   "research": {
     "block_buy_risk_score": 95,
