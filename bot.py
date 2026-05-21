@@ -147,6 +147,16 @@ class AIPlanConfig:
 
 
 @dataclass(frozen=True)
+class PredictionTrackingConfig:
+    enabled: bool
+    horizons_minutes: list[int]
+    max_evaluations_per_cycle: int
+    max_pending_days: int
+    max_scan_predictions_per_cycle: int
+    min_decisive_move_bps: Decimal
+
+
+@dataclass(frozen=True)
 class ExecutionConfig:
     approval_mode: str
     aggressive_buy_score_max: int
@@ -202,6 +212,7 @@ class BotConfig:
     advanced_strategy: AdvancedStrategyConfig
     llm: LLMConfig
     ai_plan: AIPlanConfig
+    prediction_tracking: PredictionTrackingConfig
     execution: ExecutionConfig
     multi_timeframe: MultiTimeframeConfig
     shadow: ShadowConfig
@@ -215,6 +226,7 @@ class BotConfig:
     research_cache_file: Path
     ai_plan_file: Path
     ai_plan_log_file: Path
+    prediction_log_file: Path
     shadow_state_file: Path
     shadow_log_file: Path
 
@@ -483,6 +495,17 @@ def load_config(path: Path) -> BotConfig:
             block_when_unavailable=bool(raw.get("ai_plan", {}).get("block_when_unavailable", False)),
             history_limit=int(raw.get("ai_plan", {}).get("history_limit", 500)),
         ),
+        prediction_tracking=PredictionTrackingConfig(
+            enabled=bool(raw.get("prediction_tracking", {}).get("enabled", True)),
+            horizons_minutes=[
+                int(value)
+                for value in raw.get("prediction_tracking", {}).get("horizons_minutes", [15, 60, 360, 1440])
+            ],
+            max_evaluations_per_cycle=int(raw.get("prediction_tracking", {}).get("max_evaluations_per_cycle", 24)),
+            max_pending_days=int(raw.get("prediction_tracking", {}).get("max_pending_days", 7)),
+            max_scan_predictions_per_cycle=int(raw.get("prediction_tracking", {}).get("max_scan_predictions_per_cycle", 8)),
+            min_decisive_move_bps=Decimal(str(raw.get("prediction_tracking", {}).get("min_decisive_move_bps", "25"))),
+        ),
         execution=ExecutionConfig(
             approval_mode=str(raw.get("execution", {}).get("approval_mode", "aggressive_only")),
             aggressive_buy_score_max=int(raw.get("execution", {}).get("aggressive_buy_score_max", raw["strategy"].get("min_buy_score", 3))),
@@ -524,6 +547,7 @@ def load_config(path: Path) -> BotConfig:
         research_cache_file=base_dir / raw["paths"].get("research_cache", "research_snapshot.json"),
         ai_plan_file=base_dir / raw["paths"].get("ai_plan", "ai_plan.json"),
         ai_plan_log_file=base_dir / raw["paths"].get("ai_plan_log", "ai_plan_log.jsonl"),
+        prediction_log_file=base_dir / raw["paths"].get("prediction_log", "prediction_outcomes.jsonl"),
         shadow_state_file=base_dir / raw["paths"].get("shadow_state", "shadow_state.json"),
         shadow_log_file=base_dir / raw["paths"].get("shadow_log", "shadow_trades.jsonl"),
     )
@@ -647,6 +671,278 @@ def log_event(config: BotConfig, event: dict[str, Any]) -> None:
     with config.trade_log.open("a") as fh:
         fh.write(json.dumps(event, sort_keys=True) + "\n")
     record_event(config.ledger_db, event)
+
+
+def append_prediction_log(config: BotConfig, record: dict[str, Any]) -> None:
+    config.prediction_log_file.parent.mkdir(parents=True, exist_ok=True)
+    with config.prediction_log_file.open("a") as fh:
+        fh.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+def read_prediction_log(config: BotConfig, limit: int | None = None) -> list[dict[str, Any]]:
+    if not config.prediction_log_file.exists():
+        return []
+    lines = config.prediction_log_file.read_text().splitlines()
+    if limit is not None:
+        lines = lines[-limit:]
+    rows: list[dict[str, Any]] = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(item, dict):
+            rows.append(item)
+    return rows
+
+
+def prediction_direction(config: BotConfig, signal: str, score: int) -> str:
+    if signal == "buy" or score >= config.strategy.min_buy_score:
+        return "bullish"
+    if signal == "sell" or score <= -config.strategy.min_sell_score:
+        return "bearish"
+    return "flat_or_no_edge"
+
+
+def prediction_id(payload: dict[str, Any]) -> str:
+    stable = {
+        "ts": payload.get("created_at"),
+        "pair": payload.get("pair"),
+        "source": payload.get("source"),
+        "signal": payload.get("signal"),
+        "score": payload.get("score"),
+        "price": payload.get("price"),
+    }
+    raw = json.dumps(stable, sort_keys=True)
+    return hashlib.sha256(raw.encode()).hexdigest()[:24]
+
+
+def compact_prediction_context(event: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "risk": event.get("risk"),
+        "signal_reason": event.get("signal_reason"),
+        "market_metrics": event.get("market_metrics", {}),
+        "market_regime": event.get("market_regime", {}),
+        "market_radar": event.get("market_radar", {}),
+        "research": event.get("research", {}),
+        "fee_edge_check": event.get("fee_edge_check", {}),
+        "ai_plan": event.get("ai_plan", {}),
+        "ai_override": event.get("ai_override", {}),
+        "order": event.get("order", {}),
+    }
+
+
+def build_event_prediction_records(config: BotConfig, event: dict[str, Any], created_at: str) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    signal = str(event.get("signal") or "hold")
+    score = int(event.get("score") or 0)
+    primary = {
+        "type": "prediction",
+        "created_at": created_at,
+        "source": "primary_decision",
+        "mode": event.get("mode"),
+        "pair": event.get("pair"),
+        "signal": signal,
+        "direction": prediction_direction(config, signal, score),
+        "risk": event.get("risk"),
+        "score": score,
+        "price": event.get("price"),
+        "rsi": event.get("rsi"),
+        "momentum_pct": event.get("momentum_pct"),
+        "horizons_minutes": config.prediction_tracking.horizons_minutes,
+        "required_edge_bps": str(estimated_round_trip_cost_bps(config) + config.risk.min_net_profit_bps),
+        "context": compact_prediction_context(event),
+    }
+    primary["prediction_id"] = prediction_id(primary)
+    records.append(primary)
+
+    candidates = event.get("scan_candidates")
+    if isinstance(candidates, list) and config.prediction_tracking.max_scan_predictions_per_cycle > 0:
+        for candidate in candidates[: config.prediction_tracking.max_scan_predictions_per_cycle]:
+            if not isinstance(candidate, dict):
+                continue
+            pair = candidate.get("pair")
+            if not pair or pair == event.get("pair"):
+                continue
+            candidate_signal = str(candidate.get("signal") or "hold")
+            candidate_score = int(candidate.get("score") or 0)
+            record = {
+                "type": "prediction",
+                "created_at": created_at,
+                "source": "scan_candidate",
+                "mode": event.get("mode"),
+                "pair": pair,
+                "signal": candidate_signal,
+                "direction": prediction_direction(config, candidate_signal, candidate_score),
+                "risk": candidate.get("market_reason"),
+                "score": candidate_score,
+                "price": candidate.get("price"),
+                "rsi": candidate.get("rsi"),
+                "momentum_pct": candidate.get("momentum_pct"),
+                "horizons_minutes": config.prediction_tracking.horizons_minutes,
+                "required_edge_bps": str(estimated_round_trip_cost_bps(config) + config.risk.min_net_profit_bps),
+                "context": {
+                    "signal_reason": candidate.get("signal_reason"),
+                    "market_allowed": candidate.get("market_allowed"),
+                    "market_metrics": candidate.get("market_metrics", {}),
+                    "advanced_strategy": candidate.get("advanced_strategy", {}),
+                    "order_execution": candidate.get("order_execution"),
+                },
+            }
+            record["prediction_id"] = prediction_id(record)
+            records.append(record)
+    return records
+
+
+def parse_utc(value: Any) -> datetime:
+    parsed = datetime.fromisoformat(str(value))
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def prediction_verdict(config: BotConfig, prediction: dict[str, Any], return_bps: Decimal) -> tuple[str, str]:
+    required = Decimal(str(prediction.get("required_edge_bps") or estimated_round_trip_cost_bps(config)))
+    decisive = max(config.prediction_tracking.min_decisive_move_bps, required)
+    direction = str(prediction.get("direction") or "flat_or_no_edge")
+    risk = str(prediction.get("risk") or "")
+    if direction == "bullish":
+        if return_bps >= decisive:
+            return "correct", "bullish_edge_realized"
+        if return_bps <= -config.prediction_tracking.min_decisive_move_bps:
+            return "wrong", "bullish_call_lost_value"
+        return "partial", "bullish_call_not_fee_decisive"
+    if direction == "bearish":
+        if return_bps <= -decisive:
+            return "correct", "bearish_or_exit_saved_value"
+        if return_bps >= config.prediction_tracking.min_decisive_move_bps:
+            return "wrong", "bearish_call_missed_upside"
+        return "partial", "bearish_call_not_decisive"
+    if return_bps >= decisive:
+        return "wrong", "missed_fee_adjusted_upside"
+    if risk.endswith("risk_off") or risk in {"hold_signal", "fee_edge_too_small", "market_breadth_risk_off"}:
+        return "correct", "hold_or_risk_off_avoided_unpaid_edge"
+    return "partial", "flat_call_no_fee_edge"
+
+
+def evaluate_prediction_record(
+    config: BotConfig,
+    prediction: dict[str, Any],
+    horizon_minutes: int,
+    evaluation_price: Decimal,
+    evaluated_at: str,
+) -> dict[str, Any]:
+    entry_price = Decimal(str(prediction.get("price")))
+    return_bps = ((evaluation_price - entry_price) / entry_price * Decimal("10000")) if entry_price > 0 else Decimal("0")
+    verdict, reason = prediction_verdict(config, prediction, return_bps)
+    required = Decimal(str(prediction.get("required_edge_bps") or estimated_round_trip_cost_bps(config)))
+    return {
+        "type": "prediction_outcome",
+        "prediction_id": prediction.get("prediction_id"),
+        "source": prediction.get("source"),
+        "created_at": prediction.get("created_at"),
+        "evaluated_at": evaluated_at,
+        "horizon_minutes": horizon_minutes,
+        "mode": prediction.get("mode"),
+        "pair": prediction.get("pair"),
+        "signal": prediction.get("signal"),
+        "direction": prediction.get("direction"),
+        "risk": prediction.get("risk"),
+        "score": prediction.get("score"),
+        "entry_price": prediction.get("price"),
+        "evaluation_price": str(evaluation_price),
+        "return_bps": str(return_bps),
+        "required_edge_bps": str(required),
+        "fee_adjusted_return_bps": str(return_bps - required),
+        "verdict": verdict,
+        "reason": reason,
+    }
+
+
+def evaluate_due_predictions(
+    config: BotConfig,
+    client: KrakenClient,
+    market_data: dict[str, tuple[Ticker, list[Candle]]],
+    now: datetime,
+) -> list[dict[str, Any]]:
+    rows = read_prediction_log(config)
+    predictions = [row for row in rows if row.get("type") == "prediction"]
+    resolved = {
+        (str(row.get("prediction_id")), int(row.get("horizon_minutes") or 0))
+        for row in rows
+        if row.get("type") == "prediction_outcome"
+    }
+    outcomes: list[dict[str, Any]] = []
+    cutoff = now - timedelta(days=config.prediction_tracking.max_pending_days)
+    for prediction in predictions:
+        if len(outcomes) >= config.prediction_tracking.max_evaluations_per_cycle:
+            break
+        try:
+            created_at = parse_utc(prediction.get("created_at"))
+            entry_price = Decimal(str(prediction.get("price")))
+        except Exception:
+            continue
+        if created_at < cutoff or entry_price <= 0:
+            continue
+        for horizon in prediction.get("horizons_minutes", config.prediction_tracking.horizons_minutes):
+            horizon_minutes = int(horizon)
+            key = (str(prediction.get("prediction_id")), horizon_minutes)
+            if key in resolved or now < created_at + timedelta(minutes=horizon_minutes):
+                continue
+            pair = str(prediction.get("pair"))
+            try:
+                if pair in market_data:
+                    evaluation_price = market_data[pair][0].last
+                else:
+                    evaluation_price = client.ticker(pair).last
+            except Exception as exc:
+                outcomes.append(
+                    {
+                        "type": "prediction_outcome_error",
+                        "prediction_id": prediction.get("prediction_id"),
+                        "pair": pair,
+                        "horizon_minutes": horizon_minutes,
+                        "evaluated_at": now.isoformat(),
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+                continue
+            outcomes.append(evaluate_prediction_record(config, prediction, horizon_minutes, evaluation_price, now.isoformat()))
+            if len(outcomes) >= config.prediction_tracking.max_evaluations_per_cycle:
+                break
+    return outcomes
+
+
+def prediction_tracking_cycle(
+    config: BotConfig,
+    client: KrakenClient,
+    event: dict[str, Any],
+    market_data: dict[str, tuple[Ticker, list[Candle]]],
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    if not config.prediction_tracking.enabled:
+        return {"enabled": False}
+    now = now or datetime.now(timezone.utc)
+    outcomes = evaluate_due_predictions(config, client, market_data, now)
+    for outcome in outcomes:
+        append_prediction_log(config, outcome)
+    created_at = event.get("ts") or now.isoformat()
+    records = build_event_prediction_records(config, event, created_at)
+    for record in records:
+        append_prediction_log(config, record)
+    verdict_counts: dict[str, int] = {}
+    for outcome in outcomes:
+        verdict = str(outcome.get("verdict") or outcome.get("type") or "unknown")
+        verdict_counts[verdict] = verdict_counts.get(verdict, 0) + 1
+    return {
+        "enabled": True,
+        "log_file": str(config.prediction_log_file),
+        "recorded_predictions": len(records),
+        "evaluated_outcomes": len(outcomes),
+        "verdict_counts": verdict_counts,
+    }
 
 
 def notify(title: str, message: str) -> None:
@@ -2833,6 +3129,14 @@ def run_once(config: BotConfig, validate_orders: bool) -> dict[str, Any]:
         else:
             event["order"] = {"status": "skipped", "reason": risk_reason}
 
+        event["ts"] = datetime.now(timezone.utc).isoformat()
+        try:
+            event["prediction_tracking"] = prediction_tracking_cycle(config, client, event, market_data, parse_utc(event["ts"]))
+        except Exception as exc:
+            event["prediction_tracking"] = {
+                "enabled": config.prediction_tracking.enabled,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
         log_event(config, event)
         maybe_send_daily_report(config, state)
         save_state(config, state)

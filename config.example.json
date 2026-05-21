@@ -173,6 +173,7 @@
     "ledger_db": "ledger.sqlite3",
     "notification_outbox": "notification_outbox.jsonl",
     "pending_order": "pending_order.json",
+    "prediction_log": "prediction_outcomes.jsonl",
     "research_cache": "research_snapshot.json",
     "shadow_log": "shadow_trades.jsonl",
     "shadow_state": "shadow_state.json",
@@ -180,6 +181,19 @@
     "trade_log": "trades.jsonl"
   },
   "poll_seconds": 300,
+  "prediction_tracking": {
+    "enabled": true,
+    "horizons_minutes": [
+      15,
+      60,
+      360,
+      1440
+    ],
+    "max_evaluations_per_cycle": 24,
+    "max_pending_days": 7,
+    "max_scan_predictions_per_cycle": 8,
+    "min_decisive_move_bps": 25
+  },
   "protections": {
     "consecutive_loss_limit": 2,
     "enabled": true,

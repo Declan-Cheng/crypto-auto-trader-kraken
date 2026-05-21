@@ -827,6 +827,91 @@ def test_scan_pair_candidates_scores_without_orders(tmp_path: Path) -> None:
     assert "estimated_round_trip_cost_bps" in results[0]
 
 
+def test_prediction_records_include_hold_and_scan_candidates(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    event = {
+        "mode": "paper",
+        "pair": "XBTUSD",
+        "signal": "hold",
+        "signal_reason": "no_edge",
+        "risk": "hold_signal",
+        "score": 1,
+        "price": "100",
+        "rsi": "50",
+        "momentum_pct": "0.1",
+        "market_metrics": {"spread_bps": "5"},
+        "order": {"status": "skipped", "reason": "hold_signal"},
+        "scan_candidates": [
+            {"pair": "ETHUSD", "signal": "buy", "score": 5, "price": "10", "momentum_pct": "1", "market_reason": "market_ok"}
+        ],
+    }
+
+    records = bot.build_event_prediction_records(config, event, "2026-05-21T00:00:00+00:00")
+
+    assert len(records) == 2
+    assert records[0]["source"] == "primary_decision"
+    assert records[0]["direction"] == "flat_or_no_edge"
+    assert records[0]["risk"] == "hold_signal"
+    assert records[1]["source"] == "scan_candidate"
+    assert records[1]["direction"] == "bullish"
+    assert records[1]["prediction_id"]
+
+
+def test_prediction_tracking_marks_missed_hold_after_fee_adjusted_upside(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    config = replace(
+        config,
+        prediction_tracking=replace(
+            config.prediction_tracking,
+            horizons_minutes=[15],
+            max_evaluations_per_cycle=10,
+            max_scan_predictions_per_cycle=0,
+        ),
+    )
+    old_event = {
+        "mode": "paper",
+        "pair": "XBTUSD",
+        "signal": "hold",
+        "signal_reason": "no_edge",
+        "risk": "hold_signal",
+        "score": 0,
+        "price": "100",
+        "order": {"status": "skipped", "reason": "hold_signal"},
+    }
+    old_records = bot.build_event_prediction_records(config, old_event, "2026-05-21T00:00:00+00:00")
+    bot.append_prediction_log(config, old_records[0])
+
+    class FakeClient:
+        def ticker(self, pair: str) -> bot.Ticker:
+            assert pair == "XBTUSD"
+            return bot.Ticker(Decimal("102"), Decimal("102"), Decimal("102"), Decimal("0"), Decimal("2"))
+
+    new_event = {
+        "mode": "paper",
+        "pair": "XBTUSD",
+        "signal": "hold",
+        "signal_reason": "no_edge",
+        "risk": "hold_signal",
+        "score": 0,
+        "price": "102",
+        "order": {"status": "skipped", "reason": "hold_signal"},
+    }
+
+    summary = bot.prediction_tracking_cycle(
+        config,
+        FakeClient(),
+        new_event,
+        {},
+        datetime(2026, 5, 21, 0, 16, tzinfo=timezone.utc),
+    )
+    rows = bot.read_prediction_log(config)
+    outcomes = [row for row in rows if row.get("type") == "prediction_outcome"]
+
+    assert summary["evaluated_outcomes"] == 1
+    assert outcomes[0]["verdict"] == "wrong"
+    assert outcomes[0]["reason"] == "missed_fee_adjusted_upside"
+
+
 def test_market_radar_computes_breadth_from_multiple_pairs(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     make_candles = candles

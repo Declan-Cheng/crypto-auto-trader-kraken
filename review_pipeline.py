@@ -91,6 +91,47 @@ def decimal_or_zero(value: Any) -> Decimal:
         return Decimal("0")
 
 
+def prediction_tracking_summary(path: Path, days: int) -> dict[str, Any]:
+    if not path.exists():
+        return {"enabled": True, "log_exists": False, "prediction_count": 0, "outcome_count": 0}
+    since = now_utc() - timedelta(days=days)
+    predictions: list[dict[str, Any]] = []
+    outcomes: list[dict[str, Any]] = []
+    for row in read_jsonl_tail(path, 4000):
+        row_type = row.get("type")
+        timestamp = row.get("created_at") or row.get("evaluated_at")
+        try:
+            if timestamp and datetime.fromisoformat(str(timestamp)).astimezone(timezone.utc) < since:
+                continue
+        except Exception:
+            pass
+        if row_type == "prediction":
+            predictions.append(row)
+        elif row_type == "prediction_outcome":
+            outcomes.append(row)
+    verdict_counts = Counter(str(row.get("verdict") or "unknown") for row in outcomes)
+    reason_counts = Counter(str(row.get("reason") or "unknown") for row in outcomes)
+    source_counts = Counter(str(row.get("source") or "unknown") for row in predictions)
+    missed = [
+        row
+        for row in outcomes
+        if row.get("verdict") == "wrong" and "missed" in str(row.get("reason") or "")
+    ]
+    return {
+        "enabled": True,
+        "log_exists": True,
+        "days": days,
+        "prediction_count": len(predictions),
+        "outcome_count": len(outcomes),
+        "pending_estimate": max(0, len(predictions) - len({row.get("prediction_id") for row in outcomes})),
+        "source_counts": dict(source_counts.most_common(8)),
+        "verdict_counts": dict(verdict_counts.most_common(8)),
+        "reason_counts": dict(reason_counts.most_common(8)),
+        "recent_wrong_or_missed": missed[-8:],
+        "latest_outcomes": outcomes[-12:],
+    }
+
+
 def ledger_range_summary(db_path: Path, mode: str, days: int) -> dict[str, Any]:
     since = (now_utc() - timedelta(days=days)).isoformat()
     if not db_path.exists():
@@ -191,6 +232,7 @@ def build_review_report(config_path: Path, period: str) -> dict[str, Any]:
         "scorecard": scorecard,
         "latest_event": latest_event,
         "latest_ai_plan": read_json(config.ai_plan_file, {}),
+        "prediction_tracking": prediction_tracking_summary(config.prediction_log_file, days),
         "research_snapshot": read_json(config.research_cache_file, {}),
         "recent_ai_plans": ai_log_tail,
         "recent_trade_events": trade_tail,
@@ -206,6 +248,7 @@ def summarize_report(report: dict[str, Any]) -> dict[str, Any]:
     radar = latest.get("market_radar", {}) if isinstance(latest.get("market_radar"), dict) else {}
     research = latest.get("research", {}) if isinstance(latest.get("research"), dict) else {}
     ai_plan = report.get("latest_ai_plan", {})
+    prediction_tracking = report.get("prediction_tracking", {})
     return {
         "period": report.get("period"),
         "pnl_quote": ledger.get("pnl_quote"),
@@ -219,6 +262,7 @@ def summarize_report(report: dict[str, Any]) -> dict[str, Any]:
         "research_risk_level": research.get("risk_level"),
         "ai_action": ai_plan.get("action"),
         "ai_source": ai_plan.get("source"),
+        "prediction_verdict_counts": prediction_tracking.get("verdict_counts"),
     }
 
 
@@ -229,6 +273,7 @@ def format_markdown_report(report: dict[str, Any]) -> str:
     latest = report.get("latest_event", {})
     ai_plan = report.get("latest_ai_plan", {})
     research = report.get("research_snapshot", {})
+    prediction_tracking = report.get("prediction_tracking", {})
     lines = [
         f"# Kraken {report['period']} review",
         "",
@@ -242,6 +287,7 @@ def format_markdown_report(report: dict[str, Any]) -> str:
         f"- Market breadth: {summary.get('market_breadth')} risk_off={summary.get('market_risk_off')}",
         f"- Research risk: {summary.get('research_risk_level')} score={summary.get('research_risk_score')}",
         f"- AI plan: {summary.get('ai_action')} source={summary.get('ai_source')}",
+        f"- Prediction tracking: predictions={prediction_tracking.get('prediction_count')} outcomes={prediction_tracking.get('outcome_count')} verdicts={prediction_tracking.get('verdict_counts')}",
         "",
         "## Scorecard",
         "",
@@ -277,6 +323,12 @@ def format_markdown_report(report: dict[str, Any]) -> str:
         ),
         "```",
         "",
+        "## Prediction Tracking",
+        "",
+        "```json",
+        json.dumps(prediction_tracking, ensure_ascii=False, indent=2, sort_keys=True)[:12000],
+        "```",
+        "",
         "## Latest AI Plan",
         "",
         "```json",
@@ -301,6 +353,7 @@ def build_model_prompt(report: dict[str, Any]) -> str:
         "scorecard": report.get("scorecard"),
         "latest_event": report.get("latest_event"),
         "latest_ai_plan": report.get("latest_ai_plan"),
+        "prediction_tracking": report.get("prediction_tracking"),
         "research_snapshot": report.get("research_snapshot"),
         "recent_ai_plans": report.get("recent_ai_plans", [])[-8:],
         "recent_trade_events": report.get("recent_trade_events", [])[-80:],
